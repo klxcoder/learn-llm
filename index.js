@@ -20,107 +20,101 @@ function trainModels(text) {
   return { unigrams, bigrams, trigrams };
 }
 
-// --- Helper: Sample from a distribution with temperature, topK, and topP ---
-function sampleFromDistribution(distribution, temperature = 1, topK = null, topP = null) {
-  // Apply temperature scaling.
-  let dist = distribution.map(d => ({
-    word: d.word,
-    prob: Math.pow(d.prob, 1 / temperature)
-  }));
-  let sum = dist.reduce((s, d) => s + d.prob, 0);
-  dist = dist.map(d => ({ word: d.word, prob: d.prob / sum }));
-
-  // Apply topK filtering.
-  if (topK && topK < dist.length) {
-    dist.sort((a, b) => b.prob - a.prob);
-    dist = dist.slice(0, topK);
-    sum = dist.reduce((s, d) => s + d.prob, 0);
-    dist = dist.map(d => ({ word: d.word, prob: d.prob / sum }));
-  }
-
-  // Apply topP (nucleus) filtering.
-  if (topP && topP < 1) {
-    dist.sort((a, b) => b.prob - a.prob);
-    let cumulative = 0, nucleus = [];
-    for (let d of dist) {
-      cumulative += d.prob;
-      nucleus.push(d);
-      if (cumulative >= topP) break;
-    }
-    sum = nucleus.reduce((s, d) => s + d.prob, 0);
-    dist = nucleus.map(d => ({ word: d.word, prob: d.prob / sum }));
-  }
-
-  // Sample from the final distribution.
-  let r = Math.random();
-  for (let d of dist) {
-    r -= d.prob;
-    if (r < 0) return d.word;
-  }
-  return dist[dist.length - 1].word;
-}
-
-// --- Generation: Interpolated n-gram sampling ---
-// Instead of a strict backoff, we compute a combined probability for every candidate.
-function generateTextInterpolated(models, startWords, numWords = 50, options = {}) {
+// --- Advanced Beam Search Generation with Interpolation and Sampling Filters ---
+function generateTextBeamSearch(models, startWords, numWords = 50, options = {}) {
   const {
+    beamWidth = 3,
     temperature = 1,
     topK = null,
     topP = null,
-    // Lambda weights for unigram, bigram, and trigram contributions.
+    // Lambda weights for trigram, bigram, and unigram interpolation.
     lambdas = { unigram: 0.2, bigram: 0.3, trigram: 0.5 }
   } = options;
 
-  const words = startWords.split(" ");
-  // Precompute total count for unigrams.
+  const vocabulary = Object.keys(models.unigrams);
   const totalUnigrams = Object.values(models.unigrams).reduce((a, b) => a + b, 0);
 
-  while (words.length < numWords) {
-    const candidateSet = Object.keys(models.unigrams);
-    let distribution = [];
-    const lastWord = words[words.length - 1];
-    const trigramContext = words.length >= 2 ? words.slice(-2).join(" ") : null;
+  // Each beam is an object with a 'sequence' (array of words) and a cumulative 'prob'.
+  let beams = [{ sequence: startWords.split(" "), prob: 1 }];
 
-    candidateSet.forEach(candidate => {
-      // Trigram probability (if context exists).
-      let pTri = 0;
-      if (trigramContext && models.trigrams[trigramContext] && models.trigrams[trigramContext][candidate]) {
-        const triTotal = Object.values(models.trigrams[trigramContext]).reduce((a, b) => a + b, 0);
-        pTri = models.trigrams[trigramContext][candidate] / triTotal;
+  while (beams.length > 0 && beams[0].sequence.length < numWords) {
+    const newBeams = [];
+    for (let beam of beams) {
+      const seq = beam.sequence;
+      const lastWord = seq[seq.length - 1];
+      const trigramContext = seq.length >= 2 ? seq.slice(-2).join(" ") : null;
+
+      // Compute interpolated probabilities for each candidate in the vocabulary.
+      let candidates = [];
+      for (let word of vocabulary) {
+        let pTri = 0;
+        if (trigramContext && models.trigrams[trigramContext] && models.trigrams[trigramContext][word]) {
+          const triTotal = Object.values(models.trigrams[trigramContext]).reduce((a, b) => a + b, 0);
+          pTri = models.trigrams[trigramContext][word] / triTotal;
+        }
+        let pBi = 0;
+        if (lastWord && models.bigrams[lastWord] && models.bigrams[lastWord][word]) {
+          const biTotal = Object.values(models.bigrams[lastWord]).reduce((a, b) => a + b, 0);
+          pBi = models.bigrams[lastWord][word] / biTotal;
+        }
+        const pUni = models.unigrams[word] / totalUnigrams;
+        const pCombined = lambdas.trigram * pTri + lambdas.bigram * pBi + lambdas.unigram * pUni;
+        candidates.push({ word, prob: pCombined });
       }
 
-      // Bigram probability (if last word exists).
-      let pBi = 0;
-      if (lastWord && models.bigrams[lastWord] && models.bigrams[lastWord][candidate]) {
-        const biTotal = Object.values(models.bigrams[lastWord]).reduce((a, b) => a + b, 0);
-        pBi = models.bigrams[lastWord][candidate] / biTotal;
+      // Normalize candidate probabilities.
+      let sumProb = candidates.reduce((s, c) => s + c.prob, 0);
+      candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
+
+      // Apply temperature scaling: sharpen or flatten the distribution.
+      candidates = candidates.map(c => ({ word: c.word, prob: Math.pow(c.prob, 1 / temperature) }));
+      sumProb = candidates.reduce((s, c) => s + c.prob, 0);
+      candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
+
+      // Apply topK filtering if specified.
+      if (topK && topK < candidates.length) {
+        candidates.sort((a, b) => b.prob - a.prob);
+        candidates = candidates.slice(0, topK);
+        sumProb = candidates.reduce((s, c) => s + c.prob, 0);
+        candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
       }
 
-      // Unigram probability.
-      const pUni = models.unigrams[candidate] / totalUnigrams;
+      // Apply topP (nucleus) filtering if specified.
+      if (topP && topP < 1) {
+        candidates.sort((a, b) => b.prob - a.prob);
+        let cumProb = 0, nucleus = [];
+        for (let cand of candidates) {
+          cumProb += cand.prob;
+          nucleus.push(cand);
+          if (cumProb >= topP) break;
+        }
+        sumProb = nucleus.reduce((s, c) => s + c.prob, 0);
+        candidates = nucleus.map(c => ({ word: c.word, prob: c.prob / sumProb }));
+      }
 
-      // Combined (interpolated) probability.
-      const pCombined = lambdas.trigram * pTri + lambdas.bigram * pBi + lambdas.unigram * pUni;
-      distribution.push({ word: candidate, prob: pCombined });
-    });
-
-    // Normalize distribution.
-    const sumDist = distribution.reduce((s, d) => s + d.prob, 0);
-    distribution = distribution.map(d => ({ word: d.word, prob: d.prob / sumDist }));
-
-    // Sample next word.
-    const nextWord = sampleFromDistribution(distribution, temperature, topK, topP);
-    words.push(nextWord);
+      // Extend the current beam with each candidate.
+      for (let cand of candidates) {
+        newBeams.push({
+          sequence: [...seq, cand.word],
+          prob: beam.prob * cand.prob
+        });
+      }
+    }
+    // Keep only the top beams (by cumulative probability).
+    newBeams.sort((a, b) => b.prob - a.prob);
+    beams = newBeams.slice(0, beamWidth);
+    if (newBeams.length === 0) break;
   }
 
-  return words.join(" ");
+  // Return the sequence of the highest-probability beam.
+  return beams.length ? beams[0].sequence.join(" ") : "";
 }
 
 // --- Example Usage ---
 const trainingText = "The dog likes eating food. The dog likes eating fish. The cat likes eating food. The cat likes eating fish. The dog is friendly and playful. The cat is graceful and curious. The fish is swimming in clear water. The fish is colorful and lively. The food is delicious and nutritious. The food is served with care. The fish like to swim together in a school. The fish like to explore their surroundings.";
-
 const models = trainModels(trainingText);
-const generatedText = generateTextInterpolated(models, "The dog", 30, {
+const generatedText = generateTextBeamSearch(models, "The dog", 30, {
+  beamWidth: 3,
   temperature: 0.8,
   topK: 5,
   topP: 0.9,
