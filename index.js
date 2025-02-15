@@ -20,37 +20,38 @@ function trainModels(text) {
   return { unigrams, bigrams, trigrams };
 }
 
-// --- Diverse Beam Search Generation with Interpolation and Sampling Filters ---
-// Adds a diversity penalty so that beams favor different continuations.
-function generateTextDiverseBeamSearch(models, startWords, numWords = 50, options = {}) {
+// --- Advanced Beam Search with Log-Probabilities, Length Normalization, and Penalties ---
+function generateTextAdvancedBeamSearch(models, startWords, numWords = 50, options = {}) {
   const {
     beamWidth = 3,
-    diversityAlpha = 0.5, // Penalty factor: higher means more diversity.
-    temperature = 1,
-    topK = null,
-    topP = null,
+    diversityAlpha = 0.5,      // Diversity penalty: discourages same continuations across beams.
+    repetitionPenalty = 0.1,   // Penalty per occurrence of a candidate in the beam.
+    temperature = 1,           // Temperature scaling (applied in log space).
+    topK = null,               // Optional: restrict candidates to topK.
+    topP = null,               // Optional: nucleus filtering (topP cumulative probability).
     // Lambda weights for trigram, bigram, and unigram interpolation.
-    lambdas = { unigram: 0.2, bigram: 0.3, trigram: 0.5 }
+    lambdas = { unigram: 0.2, bigram: 0.3, trigram: 0.5 },
+    lengthNormalization = true // Normalize cumulative log score by sequence length.
   } = options;
 
   const vocabulary = Object.keys(models.unigrams);
   const totalUnigrams = Object.values(models.unigrams).reduce((a, b) => a + b, 0);
 
-  // Each beam is an object with a 'sequence' (array of words) and a cumulative 'prob'.
-  let beams = [{ sequence: startWords.split(" "), prob: 1 }];
+  // Initialize beams with starting words and a cumulative log-probability score (0 = log(1)).
+  let beams = [{ sequence: startWords.split(" "), score: 0 }];
 
   while (beams.length && beams[0].sequence.length < numWords) {
-    const newBeams = [];
-    // Gather last words from all current beams to compute diversity penalty.
-    const lastWords = beams.map(beam => beam.sequence[beam.sequence.length - 1]);
+    let newBeams = [];
+    // Gather last words of current beams for diversity penalty.
+    const lastWords = beams.map(b => b.sequence[b.sequence.length - 1]);
 
     for (let beam of beams) {
       const seq = beam.sequence;
       const lastWord = seq[seq.length - 1];
       const trigramContext = seq.length >= 2 ? seq.slice(-2).join(" ") : null;
 
-      // For each word in the vocabulary, compute an interpolated probability.
       let candidates = [];
+      // For each candidate in the vocabulary, compute an interpolated probability.
       for (let word of vocabulary) {
         let pTri = 0;
         if (trigramContext && models.trigrams[trigramContext] && models.trigrams[trigramContext][word]) {
@@ -64,56 +65,58 @@ function generateTextDiverseBeamSearch(models, startWords, numWords = 50, option
         }
         const pUni = models.unigrams[word] / totalUnigrams;
         let pCombined = lambdas.trigram * pTri + lambdas.bigram * pBi + lambdas.unigram * pUni;
+        if (pCombined <= 0) continue;
 
-        // Apply diversity penalty: if 'word' appears as the last word in other beams, penalize it.
-        const penalty = diversityAlpha * lastWords.filter(w => w === word).length;
-        pCombined = Math.max(pCombined - penalty, 0);
-        candidates.push({ word, prob: pCombined });
+        // Compute log-probability (with temperature scaling).
+        let logProb = Math.log(pCombined) / temperature;
+
+        // Apply repetition penalty if 'word' appears already in the sequence.
+        const repCount = seq.filter(w => w === word).length;
+        logProb -= repetitionPenalty * repCount;
+
+        // Apply diversity penalty based on how many beams end with this word.
+        const diversityCount = lastWords.filter(w => w === word).length;
+        logProb -= diversityAlpha * diversityCount;
+
+        candidates.push({ word, logProb });
       }
 
-      // Normalize the candidate probabilities.
-      let sumProb = candidates.reduce((s, c) => s + c.prob, 0);
-      if (sumProb === 0) continue;
-      candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
+      // Sort candidates by logProb (higher is better).
+      candidates.sort((a, b) => b.logProb - a.logProb);
 
-      // Temperature scaling.
-      candidates = candidates.map(c => ({ word: c.word, prob: Math.pow(c.prob, 1 / temperature) }));
-      sumProb = candidates.reduce((s, c) => s + c.prob, 0);
-      candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
-
-      // Apply topK filtering.
-      if (topK && topK < candidates.length) {
-        candidates.sort((a, b) => b.prob - a.prob);
+      // Apply topK filtering if specified.
+      if (topK && candidates.length > topK) {
         candidates = candidates.slice(0, topK);
-        sumProb = candidates.reduce((s, c) => s + c.prob, 0);
-        candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
       }
 
-      // Apply topP (nucleus) filtering.
+      // Apply topP (nucleus) filtering if specified.
       if (topP && topP < 1) {
-        candidates.sort((a, b) => b.prob - a.prob);
-        let cumProb = 0, nucleus = [];
-        for (let cand of candidates) {
-          cumProb += cand.prob;
-          nucleus.push(cand);
-          if (cumProb >= topP) break;
+        let cumulative = 0;
+        const expCandidates = candidates.map(c => ({ word: c.word, prob: Math.exp(c.logProb) }));
+        const sumExp = expCandidates.reduce((s, c) => s + c.prob, 0);
+        expCandidates.forEach(c => c.prob /= sumExp);
+        let filteredWords = [];
+        for (let c of expCandidates) {
+          cumulative += c.prob;
+          filteredWords.push(c.word);
+          if (cumulative >= topP) break;
         }
-        sumProb = nucleus.reduce((s, c) => s + c.prob, 0);
-        candidates = nucleus.map(c => ({ word: c.word, prob: c.prob / sumProb }));
+        candidates = candidates.filter(c => filteredWords.includes(c.word));
       }
 
       // Extend the current beam with each candidate.
       for (let cand of candidates) {
-        newBeams.push({
-          sequence: [...seq, cand.word],
-          prob: beam.prob * cand.prob
-        });
+        const newSeq = seq.concat(cand.word);
+        let newScore = beam.score + cand.logProb;
+        if (lengthNormalization) {
+          newScore = newScore / newSeq.length;
+        }
+        newBeams.push({ sequence: newSeq, score: newScore });
       }
     }
-    // Keep only the top beams by cumulative probability.
-    newBeams.sort((a, b) => b.prob - a.prob);
+    // Keep only the top beams.
+    newBeams.sort((a, b) => b.score - a.score);
     beams = newBeams.slice(0, beamWidth);
-    if (newBeams.length === 0) break;
   }
 
   return beams.length ? beams[0].sequence.join(" ") : "";
@@ -121,14 +124,16 @@ function generateTextDiverseBeamSearch(models, startWords, numWords = 50, option
 
 // --- Example Usage ---
 const trainingText = "The dog likes eating food. The dog likes eating fish. The cat likes eating food. The cat likes eating fish. The dog is friendly and playful. The cat is graceful and curious. The fish is swimming in clear water. The fish is colorful and lively. The food is delicious and nutritious. The food is served with care. The fish like to swim together in a school. The fish like to explore their surroundings.";
-
 const models = trainModels(trainingText);
-const generatedText = generateTextDiverseBeamSearch(models, "The dog", 30, {
+
+const generatedText = generateTextAdvancedBeamSearch(models, "The dog", 30, {
   beamWidth: 3,
   diversityAlpha: 0.5,
+  repetitionPenalty: 0.1,
   temperature: 0.8,
   topK: 5,
   topP: 0.9,
-  lambdas: { unigram: 0.2, bigram: 0.3, trigram: 0.5 }
+  lambdas: { unigram: 0.2, bigram: 0.3, trigram: 0.5 },
+  lengthNormalization: true
 });
 console.log(generatedText);
