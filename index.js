@@ -1,26 +1,33 @@
-// Train the model: Build an n-gram to frequency map.
-function trainModel(text, n = 2) {
+// Train models: unigrams, bigrams, and trigrams
+function trainModels(text) {
   const words = text.split(/\s+/);
-  const model = {};
-  for (let i = 0; i <= words.length - n; i++) {
-    const gram = words.slice(i, i + n).join(" ");
-    const nextWord = words[i + n];
-    if (!model[gram]) {
-      model[gram] = {};
+  const unigrams = {}, bigrams = {}, trigrams = {};
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    unigrams[word] = (unigrams[word] || 0) + 1;
+
+    if (i < words.length - 1) {
+      const next = words[i + 1];
+      bigrams[word] = bigrams[word] || {};
+      bigrams[word][next] = (bigrams[word][next] || 0) + 1;
     }
-    if (nextWord) {
-      model[gram][nextWord] = (model[gram][nextWord] || 0) + 1;
+
+    if (i < words.length - 2) {
+      const key = words[i] + " " + words[i + 1];
+      const next = words[i + 2];
+      trigrams[key] = trigrams[key] || {};
+      trigrams[key][next] = (trigrams[key][next] || 0) + 1;
     }
   }
-  return model;
+
+  return { unigrams, bigrams, trigrams };
 }
 
-// Weighted random selection from a frequency map.
+// Choose a word based on weighted frequencies
 function weightedRandomChoice(freqMap) {
   let total = 0;
-  for (let word in freqMap) {
-    total += freqMap[word];
-  }
+  for (let word in freqMap) total += freqMap[word];
   let rand = Math.random() * total;
   for (let word in freqMap) {
     rand -= freqMap[word];
@@ -29,33 +36,41 @@ function weightedRandomChoice(freqMap) {
   return null;
 }
 
-// Generate text using the weighted n-gram model.
-function generateText(model, startGram, numWords = 50, n = 2) {
-  let currentGram = startGram;
-  let result = currentGram;
-  for (let i = 0; i < numWords; i++) {
-    const freqMap = model[currentGram];
-    if (!freqMap) break;
-    const nextWord = weightedRandomChoice(freqMap);
-    if (!nextWord) break;
-    result += " " + nextWord;
-    const gramWords = currentGram.split(" ");
-    gramWords.shift();
-    gramWords.push(nextWord);
-    currentGram = gramWords.join(" ");
+// Generate text with backoff: trigram > bigram > unigram
+function generateText(models, startWords, numWords = 50) {
+  const result = startWords.split(" ");
+  while (result.length < numWords) {
+    let nextWord = null;
+
+    if (result.length >= 2) {
+      const key = result.slice(-2).join(" ");
+      if (models.trigrams[key]) {
+        nextWord = weightedRandomChoice(models.trigrams[key]);
+      }
+    }
+
+    if (!nextWord && result.length >= 1) {
+      const lastWord = result[result.length - 1];
+      if (models.bigrams[lastWord]) {
+        nextWord = weightedRandomChoice(models.bigrams[lastWord]);
+      }
+    }
+
+    if (!nextWord) {
+      nextWord = weightedRandomChoice(models.unigrams);
+    }
+
+    result.push(nextWord);
   }
-  return result;
+  return result.join(" ");
 }
 
-// Example training text.
+// Example training text with varied phrases
 const trainingText = "The dog likes eating food. The dog likes eating fish. The cat likes eating food. The cat likes eating fish. The dog is friendly and playful. The cat is graceful and curious. The fish is swimming in clear water. The fish is colorful and lively. The food is delicious and nutritious. The food is served with care. The fish like to swim together in a school. The fish like to explore their surroundings.";
 
-const n = 2;
-const words = trainingText.split(/\s+/);
-const startGram = words.slice(0, n).join(" ");
-const model = trainModel(trainingText, n);
-console.log(model)
+const models = trainModels(trainingText);
 
-// Start generating text from the starting n-gram.
-const generatedParagraph = generateText(model, startGram, 30, n);
-console.log(generatedParagraph);
+console.log(models)
+
+const generatedText = generateText(models, "The dog", 30);
+console.log(generatedText);
