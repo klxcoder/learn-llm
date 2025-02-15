@@ -48,7 +48,8 @@ function generateText(model, startGram, numWords = 50, n = 2) {
 }
 
 // Example training text.
-const trainingText = "This is a simple example text for our language model. It demonstrates how a basic Markov chain can generate text. Enjoy experimenting with this toy model!";
+const trainingText = "The dog likes eating food. The dog likes eating fish. The cat likes eating food. The cat likes eating fish. The dog is friendly and playful. The cat is graceful and curious. The fish is swimming in clear water. The fish is colorful and lively. The food is delicious and nutritious. The food is served with care. The fish like to swim together in a school. The fish like to explore their surroundings.";
+
 const n = 2;
 const words = trainingText.split(/\s+/);
 const startGram = words.slice(0, n).join(" ");
