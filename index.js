@@ -19,7 +19,7 @@ function generateText(model, startWord, numWords = 50) {
   let result = currentWord;
   for (let i = 0; i < numWords - 1; i++) {
     const nextWords = model[currentWord];
-    if (!nextWords || nextWords.length === 0) break;
+    if (!nextWords) break;
     currentWord = nextWords[Math.floor(Math.random() * nextWords.length)];
     result += " " + currentWord;
   }
