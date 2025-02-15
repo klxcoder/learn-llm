@@ -20,10 +20,12 @@ function trainModels(text) {
   return { unigrams, bigrams, trigrams };
 }
 
-// --- Advanced Beam Search Generation with Interpolation and Sampling Filters ---
-function generateTextBeamSearch(models, startWords, numWords = 50, options = {}) {
+// --- Diverse Beam Search Generation with Interpolation and Sampling Filters ---
+// Adds a diversity penalty so that beams favor different continuations.
+function generateTextDiverseBeamSearch(models, startWords, numWords = 50, options = {}) {
   const {
     beamWidth = 3,
+    diversityAlpha = 0.5, // Penalty factor: higher means more diversity.
     temperature = 1,
     topK = null,
     topP = null,
@@ -37,14 +39,17 @@ function generateTextBeamSearch(models, startWords, numWords = 50, options = {})
   // Each beam is an object with a 'sequence' (array of words) and a cumulative 'prob'.
   let beams = [{ sequence: startWords.split(" "), prob: 1 }];
 
-  while (beams.length > 0 && beams[0].sequence.length < numWords) {
+  while (beams.length && beams[0].sequence.length < numWords) {
     const newBeams = [];
+    // Gather last words from all current beams to compute diversity penalty.
+    const lastWords = beams.map(beam => beam.sequence[beam.sequence.length - 1]);
+
     for (let beam of beams) {
       const seq = beam.sequence;
       const lastWord = seq[seq.length - 1];
       const trigramContext = seq.length >= 2 ? seq.slice(-2).join(" ") : null;
 
-      // Compute interpolated probabilities for each candidate in the vocabulary.
+      // For each word in the vocabulary, compute an interpolated probability.
       let candidates = [];
       for (let word of vocabulary) {
         let pTri = 0;
@@ -58,20 +63,25 @@ function generateTextBeamSearch(models, startWords, numWords = 50, options = {})
           pBi = models.bigrams[lastWord][word] / biTotal;
         }
         const pUni = models.unigrams[word] / totalUnigrams;
-        const pCombined = lambdas.trigram * pTri + lambdas.bigram * pBi + lambdas.unigram * pUni;
+        let pCombined = lambdas.trigram * pTri + lambdas.bigram * pBi + lambdas.unigram * pUni;
+
+        // Apply diversity penalty: if 'word' appears as the last word in other beams, penalize it.
+        const penalty = diversityAlpha * lastWords.filter(w => w === word).length;
+        pCombined = Math.max(pCombined - penalty, 0);
         candidates.push({ word, prob: pCombined });
       }
 
-      // Normalize candidate probabilities.
+      // Normalize the candidate probabilities.
       let sumProb = candidates.reduce((s, c) => s + c.prob, 0);
+      if (sumProb === 0) continue;
       candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
 
-      // Apply temperature scaling: sharpen or flatten the distribution.
+      // Temperature scaling.
       candidates = candidates.map(c => ({ word: c.word, prob: Math.pow(c.prob, 1 / temperature) }));
       sumProb = candidates.reduce((s, c) => s + c.prob, 0);
       candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
 
-      // Apply topK filtering if specified.
+      // Apply topK filtering.
       if (topK && topK < candidates.length) {
         candidates.sort((a, b) => b.prob - a.prob);
         candidates = candidates.slice(0, topK);
@@ -79,7 +89,7 @@ function generateTextBeamSearch(models, startWords, numWords = 50, options = {})
         candidates = candidates.map(c => ({ word: c.word, prob: c.prob / sumProb }));
       }
 
-      // Apply topP (nucleus) filtering if specified.
+      // Apply topP (nucleus) filtering.
       if (topP && topP < 1) {
         candidates.sort((a, b) => b.prob - a.prob);
         let cumProb = 0, nucleus = [];
@@ -100,21 +110,22 @@ function generateTextBeamSearch(models, startWords, numWords = 50, options = {})
         });
       }
     }
-    // Keep only the top beams (by cumulative probability).
+    // Keep only the top beams by cumulative probability.
     newBeams.sort((a, b) => b.prob - a.prob);
     beams = newBeams.slice(0, beamWidth);
     if (newBeams.length === 0) break;
   }
 
-  // Return the sequence of the highest-probability beam.
   return beams.length ? beams[0].sequence.join(" ") : "";
 }
 
 // --- Example Usage ---
 const trainingText = "The dog likes eating food. The dog likes eating fish. The cat likes eating food. The cat likes eating fish. The dog is friendly and playful. The cat is graceful and curious. The fish is swimming in clear water. The fish is colorful and lively. The food is delicious and nutritious. The food is served with care. The fish like to swim together in a school. The fish like to explore their surroundings.";
+
 const models = trainModels(trainingText);
-const generatedText = generateTextBeamSearch(models, "The dog", 30, {
+const generatedText = generateTextDiverseBeamSearch(models, "The dog", 30, {
   beamWidth: 3,
+  diversityAlpha: 0.5,
   temperature: 0.8,
   topK: 5,
   topP: 0.9,
