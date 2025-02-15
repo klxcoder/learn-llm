@@ -1,14 +1,14 @@
-// Train models for unigrams, bigrams, and trigrams.
+// --- Training: Build unigram, bigram, and trigram frequency models ---
 function trainModels(text) {
   const words = text.split(/\s+/);
   const unigrams = {}, bigrams = {}, trigrams = {};
   for (let i = 0; i < words.length; i++) {
-    const word = words[i];
-    unigrams[word] = (unigrams[word] || 0) + 1;
+    const w = words[i];
+    unigrams[w] = (unigrams[w] || 0) + 1;
     if (i < words.length - 1) {
       const next = words[i + 1];
-      bigrams[word] = bigrams[word] || {};
-      bigrams[word][next] = (bigrams[word][next] || 0) + 1;
+      bigrams[w] = bigrams[w] || {};
+      bigrams[w][next] = (bigrams[w][next] || 0) + 1;
     }
     if (i < words.length - 2) {
       const key = words[i] + " " + words[i + 1];
@@ -20,80 +20,110 @@ function trainModels(text) {
   return { unigrams, bigrams, trigrams };
 }
 
-// Advanced weighted choice with temperature, topK, and nucleus (top-p) sampling.
-function weightedRandomChoice(freqMap, temperature = 1, topK = null, topP = null) {
-  let entries = Object.entries(freqMap).map(([word, count]) => ({
-    word,
-    adjusted: Math.pow(count, 1 / temperature)
+// --- Helper: Sample from a distribution with temperature, topK, and topP ---
+function sampleFromDistribution(distribution, temperature = 1, topK = null, topP = null) {
+  // Apply temperature scaling.
+  let dist = distribution.map(d => ({
+    word: d.word,
+    prob: Math.pow(d.prob, 1 / temperature)
   }));
+  let sum = dist.reduce((s, d) => s + d.prob, 0);
+  dist = dist.map(d => ({ word: d.word, prob: d.prob / sum }));
 
-  // Apply topK filtering if provided.
-  if (topK && topK < entries.length) {
-    entries.sort((a, b) => b.adjusted - a.adjusted);
-    entries = entries.slice(0, topK);
+  // Apply topK filtering.
+  if (topK && topK < dist.length) {
+    dist.sort((a, b) => b.prob - a.prob);
+    dist = dist.slice(0, topK);
+    sum = dist.reduce((s, d) => s + d.prob, 0);
+    dist = dist.map(d => ({ word: d.word, prob: d.prob / sum }));
   }
 
-  // Convert adjusted counts to probabilities.
-  const total = entries.reduce((sum, e) => sum + e.adjusted, 0);
-  entries = entries.map(e => ({ word: e.word, prob: e.adjusted / total }));
-
-  // Apply top-p (nucleus) sampling if provided.
+  // Apply topP (nucleus) filtering.
   if (topP && topP < 1) {
-    entries.sort((a, b) => b.prob - a.prob);
+    dist.sort((a, b) => b.prob - a.prob);
     let cumulative = 0, nucleus = [];
-    for (const e of entries) {
-      cumulative += e.prob;
-      nucleus.push(e);
+    for (let d of dist) {
+      cumulative += d.prob;
+      nucleus.push(d);
       if (cumulative >= topP) break;
     }
-    const nucleusTotal = nucleus.reduce((sum, e) => sum + e.prob, 0);
-    entries = nucleus.map(e => ({ word: e.word, prob: e.prob / nucleusTotal }));
+    sum = nucleus.reduce((s, d) => s + d.prob, 0);
+    dist = nucleus.map(d => ({ word: d.word, prob: d.prob / sum }));
   }
 
-  // Sample from the final probability distribution.
-  let rand = Math.random();
-  for (const e of entries) {
-    rand -= e.prob;
-    if (rand < 0) return e.word;
+  // Sample from the final distribution.
+  let r = Math.random();
+  for (let d of dist) {
+    r -= d.prob;
+    if (r < 0) return d.word;
   }
-  return entries[entries.length - 1].word;
+  return dist[dist.length - 1].word;
 }
 
-// Generate text with backoff: trigram → bigram → unigram.
-function generateText(models, startWords, numWords = 50, options = {}) {
-  const { temperature = 1, topK = null, topP = null } = options;
+// --- Generation: Interpolated n-gram sampling ---
+// Instead of a strict backoff, we compute a combined probability for every candidate.
+function generateTextInterpolated(models, startWords, numWords = 50, options = {}) {
+  const {
+    temperature = 1,
+    topK = null,
+    topP = null,
+    // Lambda weights for unigram, bigram, and trigram contributions.
+    lambdas = { unigram: 0.2, bigram: 0.3, trigram: 0.5 }
+  } = options;
+
   const words = startWords.split(" ");
+  // Precompute total count for unigrams.
+  const totalUnigrams = Object.values(models.unigrams).reduce((a, b) => a + b, 0);
+
   while (words.length < numWords) {
-    let nextWord = null;
-    if (words.length >= 2) {
-      const key = words.slice(-2).join(" ");
-      if (models.trigrams[key]) {
-        nextWord = weightedRandomChoice(models.trigrams[key], temperature, topK, topP);
+    const candidateSet = Object.keys(models.unigrams);
+    let distribution = [];
+    const lastWord = words[words.length - 1];
+    const trigramContext = words.length >= 2 ? words.slice(-2).join(" ") : null;
+
+    candidateSet.forEach(candidate => {
+      // Trigram probability (if context exists).
+      let pTri = 0;
+      if (trigramContext && models.trigrams[trigramContext] && models.trigrams[trigramContext][candidate]) {
+        const triTotal = Object.values(models.trigrams[trigramContext]).reduce((a, b) => a + b, 0);
+        pTri = models.trigrams[trigramContext][candidate] / triTotal;
       }
-    }
-    if (!nextWord && words.length >= 1) {
-      const last = words[words.length - 1];
-      if (models.bigrams[last]) {
-        nextWord = weightedRandomChoice(models.bigrams[last], temperature, topK, topP);
+
+      // Bigram probability (if last word exists).
+      let pBi = 0;
+      if (lastWord && models.bigrams[lastWord] && models.bigrams[lastWord][candidate]) {
+        const biTotal = Object.values(models.bigrams[lastWord]).reduce((a, b) => a + b, 0);
+        pBi = models.bigrams[lastWord][candidate] / biTotal;
       }
-    }
-    if (!nextWord) {
-      nextWord = weightedRandomChoice(models.unigrams, temperature, topK, topP);
-    }
+
+      // Unigram probability.
+      const pUni = models.unigrams[candidate] / totalUnigrams;
+
+      // Combined (interpolated) probability.
+      const pCombined = lambdas.trigram * pTri + lambdas.bigram * pBi + lambdas.unigram * pUni;
+      distribution.push({ word: candidate, prob: pCombined });
+    });
+
+    // Normalize distribution.
+    const sumDist = distribution.reduce((s, d) => s + d.prob, 0);
+    distribution = distribution.map(d => ({ word: d.word, prob: d.prob / sumDist }));
+
+    // Sample next word.
+    const nextWord = sampleFromDistribution(distribution, temperature, topK, topP);
     words.push(nextWord);
   }
+
   return words.join(" ");
 }
 
-// Example training text.
+// --- Example Usage ---
 const trainingText = "The dog likes eating food. The dog likes eating fish. The cat likes eating food. The cat likes eating fish. The dog is friendly and playful. The cat is graceful and curious. The fish is swimming in clear water. The fish is colorful and lively. The food is delicious and nutritious. The food is served with care. The fish like to swim together in a school. The fish like to explore their surroundings.";
 
 const models = trainModels(trainingText);
-const generated = generateText(models, "The dog", 30, { temperature: 0.8, topK: 3, topP: 0.9 });
-console.log(generated);
-
-/*
-  + Temperature: Scales the probability distribution; lower values make choices more deterministic, higher values increase randomness.
-  + TopK: Restricts the choices to the K most likely words.
-  + TopP: Includes the smallest set of words whose cumulative probability reaches a threshold p.
-*/
+const generatedText = generateTextInterpolated(models, "The dog", 30, {
+  temperature: 0.8,
+  topK: 5,
+  topP: 0.9,
+  lambdas: { unigram: 0.2, bigram: 0.3, trigram: 0.5 }
+});
+console.log(generatedText);
