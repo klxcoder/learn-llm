@@ -9,3 +9,7 @@ print(text[:100])
 s = set(text)
 
 print(s)
+
+chars = sorted(s)
+
+print(chars)
