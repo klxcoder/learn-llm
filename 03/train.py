@@ -17,3 +17,7 @@ print(chars)
 vocab_size = len(chars)
 
 print(vocab_size) # 65
+
+stoi = { ch:i for i,ch in enumerate(chars) }
+
+print(stoi)
