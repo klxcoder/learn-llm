@@ -25,3 +25,7 @@ print(stoi)
 itos = { i:ch for i,ch in enumerate(chars) }
 
 print(itos)
+
+encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
+
+print(encode("hii there"))
