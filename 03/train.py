@@ -29,3 +29,7 @@ print(itos)
 encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
 
 print(encode("hii there"))
+
+decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+
+print(decode(encode("hii there")))
