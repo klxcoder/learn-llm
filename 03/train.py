@@ -14,6 +14,8 @@ chars = sorted(s)
 
 print(chars)
 
+print(''.join(chars))
+
 vocab_size = len(chars)
 
 print(vocab_size) # 65
