@@ -5,5 +5,9 @@ class Value:
     def __repr__(self):
         return f"Value(data={self.data})"
 
+    def __add__(self, other):
+        return Value(self.data + other.data)
+
 a = Value(5)
-print(a)
+b = Value(6)
+print(a+b)
